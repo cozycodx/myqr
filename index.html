@@ -499,6 +499,42 @@ button.small{
     pointer-events:none;
 }
 
+.card-download-btn{
+    position:absolute;
+    right:18px;
+    top:18px;
+    width:42px;
+    height:42px;
+    border-radius:50%;
+    padding:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#101828;
+    color:white;
+    box-shadow:0 10px 22px rgba(16,24,40,.22);
+    border:1px solid rgba(255,255,255,.75);
+    z-index:10;
+    pointer-events:auto;
+    touch-action:manipulation;
+}
+
+.card-download-btn:hover{
+    background:#1d2939;
+}
+
+.card-download-btn:active{
+    transform:scale(.94);
+}
+
+.card-download-btn svg{
+    width:21px;
+    height:21px;
+    display:block;
+    pointer-events:none;
+}
+
+
 .payment-card h2{
     margin:8px 0 4px;
     font-size:28px;
@@ -790,7 +826,1068 @@ button.small{
 <div class="container" id="app"></div>
 <div id="toast">Copied!</div>
 
-<script src="app.obs.js"></script>
+<script>
+const app = document.getElementById("app");
+const toast = document.getElementById("toast");
+
+const STORAGE_KEY = "customPaymentMethods";
+const defaultColor = "#2563EB";
+
+const colorOptions = [
+    "#EF4444",
+    "#F97316",
+    "#EAB308",
+    "#22C55E",
+    "#2563EB",
+    "#4F46E5",
+    "#7C3AED"
+];
+
+const fallbackColors = ["#2563EB", "#10B981", "#06B6D4", "#DC2626", "#7C3AED", "#EA580C", "#0891B2", "#16A34A"];
+
+let currentView = "empty";
+let cards = [];
+let carousel;
+let scene;
+
+let cardCount = 0;
+let angleStep = 0;
+let radius = window.innerWidth <= 480 ? 300 : 340;
+let rotation = 0;
+let startX = 0;
+let startRotation = 0;
+let isDragging = false;
+let activeIndex = 0;
+let moved = false;
+
+let editingId = null;
+let pendingQRData = null;
+let selectedColor = defaultColor;
+
+function getMethods(){
+    try{
+        const methods = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+        return Array.isArray(methods) ? methods : [];
+    }catch{
+        return [];
+    }
+}
+
+function saveMethods(methods){
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(methods));
+}
+
+function makeId(){
+    return "method_" + Date.now() + "_" + Math.random().toString(16).slice(2);
+}
+
+function colorToBackground(color){
+    return `linear-gradient(135deg, ${color} 0%, ${lightenColor(color, 38)} 100%)`;
+}
+
+function decorateMethod(method, index){
+    const color = method.color || fallbackColors[index % fallbackColors.length];
+
+    return {
+        ...method,
+        color,
+        background: colorToBackground(color)
+    };
+}
+
+function lightenColor(hex, percent){
+    const clean = hex.replace("#", "");
+    const num = parseInt(clean, 16);
+
+    let r = (num >> 16) + Math.round(255 * percent / 100);
+    let g = ((num >> 8) & 255) + Math.round(255 * percent / 100);
+    let b = (num & 255) + Math.round(255 * percent / 100);
+
+    r = Math.min(255, r);
+    g = Math.min(255, g);
+    b = Math.min(255, b);
+
+    return "#" + (r << 16 | g << 8 | b).toString(16).padStart(6, "0");
+}
+
+function showToast(message){
+    toast.textContent = message;
+    toast.classList.add("show");
+
+    setTimeout(() => {
+        toast.classList.remove("show");
+    }, 1800);
+}
+
+function showEmptyScreen(){
+    currentView = "empty";
+    document.body.style.background = colorToBackground(defaultColor);
+
+    app.innerHTML = `
+        <div class="empty-box">
+            <h2>Your QR wallet is empty</h2>
+            <p>Save payment QR codes locally and open them instantly when you need to pay or someone need to pay you.</p>
+            <button onclick="showSetupScreen()">Start setup</button>
+        </div>
+    `;
+}
+
+function showSetupScreen(){
+    currentView = "setup";
+    document.body.style.background = colorToBackground(defaultColor);
+
+    const methods = getMethods();
+
+    app.innerHTML = `
+        <div class="setup-box">
+            <h2>Payment wallet</h2>
+            <p>Manage the QR codes saved on this device.</p>
+
+            <button class="add-button" onclick="showAddForm()">Add payment QR</button>
+
+            <div class="saved-list">
+                ${
+                    methods.length === 0
+                    ? `<p style="margin-top:12px;">No saved payment QR yet. Add one to build your wallet.</p>`
+                    : methods.map((method) => `
+                        <div class="saved-item" id="item-${method.id}" data-id="${method.id}">
+                            <div class="saved-drag-row">
+                                <button 
+                                    class="drag-handle" 
+                                    type="button"
+                                    aria-label="Drag to reorder ${escapeAttribute(method.name)}"
+                                    onpointerdown="startReorder(event, '${method.id}')"
+                                >≡</button>
+
+                                <div class="saved-content">
+                                    <button class="saved-header" onclick="toggleSavedItem('${method.id}')">
+                                        ${escapeHTML(method.name)}
+                                        <span>Details</span>
+                                    </button>
+
+                                    <div class="saved-detail">
+                                        <img src="${method.qr}" alt="${escapeAttribute(method.name)} QR">
+                                        <p style="margin:8px 0 0;">
+                                            ${method.number ? escapeHTML(method.number) : "No mobile/account number added"}
+                                        </p>
+
+                                        <div class="detail-actions">
+                                            <button class="small" onclick="showEditForm('${method.id}')">Edit</button>
+                                            <button class="danger small" onclick="removeMethod('${method.id}')">Remove</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `).join("")
+                }
+            </div>
+
+            <div class="setup-actions">
+                <button onclick="finishSetup()">Done</button>
+                <button class="secondary" onclick="cancelSetup()">Cancel</button>
+            </div>
+        </div>
+    `;
+}
+
+function toggleSavedItem(id){
+    const item = document.getElementById(`item-${id}`);
+    if(item){
+        item.classList.toggle("open");
+    }
+}
+
+let reorderState = null;
+
+function startReorder(event, id){
+    event.preventDefault();
+    event.stopPropagation();
+
+    const item = document.getElementById(`item-${id}`);
+    const list = item?.parentElement;
+
+    if(!item || !list){
+        return;
+    }
+
+    reorderState = {
+        id,
+        item,
+        list
+    };
+
+    item.classList.add("dragging");
+    list.classList.add("dragging-active");
+
+    try{
+        event.currentTarget.setPointerCapture(event.pointerId);
+    }catch{}
+
+    document.addEventListener("pointermove", moveReorder);
+    document.addEventListener("pointerup", endReorder, { once:true });
+    document.addEventListener("pointercancel", endReorder, { once:true });
+}
+
+function moveReorder(event){
+    if(!reorderState){
+        return;
+    }
+
+    const afterElement = getDragAfterElement(reorderState.list, event.clientY);
+
+    if(afterElement == null){
+        reorderState.list.appendChild(reorderState.item);
+    }else{
+        reorderState.list.insertBefore(reorderState.item, afterElement);
+    }
+}
+
+function getDragAfterElement(container, y){
+    const items = [...container.querySelectorAll(".saved-item:not(.dragging)")];
+
+    return items.reduce((closest, child) => {
+        const box = child.getBoundingClientRect();
+        const offset = y - box.top - box.height / 2;
+
+        if(offset < 0 && offset > closest.offset){
+            return {
+                offset,
+                element: child
+            };
+        }
+
+        return closest;
+    }, { offset: Number.NEGATIVE_INFINITY, element: null }).element;
+}
+
+function endReorder(){
+    if(!reorderState){
+        return;
+    }
+
+    reorderState.item.classList.remove("dragging");
+    reorderState.list.classList.remove("dragging-active");
+
+    const ids = [...reorderState.list.querySelectorAll(".saved-item")]
+        .map(item => item.dataset.id);
+
+    const currentMethods = getMethods();
+    const orderedMethods = ids
+        .map(id => currentMethods.find(method => method.id === id))
+        .filter(Boolean);
+
+    if(orderedMethods.length === currentMethods.length){
+        saveMethods(orderedMethods);
+        showToast("Order saved");
+    }
+
+    document.removeEventListener("pointermove", moveReorder);
+    reorderState = null;
+}
+
+function showAddForm(){
+    editingId = null;
+    pendingQRData = null;
+    selectedColor = defaultColor;
+    showMethodForm();
+}
+
+function showEditForm(id){
+    editingId = id;
+    pendingQRData = null;
+
+    const method = getMethods().find(item => item.id === id);
+    selectedColor = method?.color || defaultColor;
+
+    showMethodForm(id);
+}
+
+function showMethodForm(id = null){
+    currentView = "form";
+    document.body.style.background = colorToBackground(defaultColor);
+
+    const methods = getMethods();
+    const method = id ? methods.find(item => item.id === id) : null;
+
+    app.innerHTML = `
+        <div class="form-box">
+            <h2>${method ? "Edit Payment Method" : "Add Payment Method"}</h2>
+
+            <div class="form-field" id="nameField">
+                <label>Name</label>
+                <input 
+                    type="text" 
+                    id="methodNameInput" 
+                    placeholder="Example: GCash, BPI, Maya"
+                    value="${method ? escapeAttribute(method.name) : ""}"
+                    oninput="clearFieldError('nameField')"
+                >
+                <div class="error-message">Name is required.</div>
+            </div>
+
+            <div class="form-field" id="qrField">
+                <label>Upload QR</label>
+                <input 
+                    type="file" 
+                    accept="image/*" 
+                    id="methodQRInput"
+                    onchange="previewQR()"
+                >
+
+                <img 
+                    id="methodQRPreview" 
+                    class="preview" 
+                    src="${method ? method.qr : ""}"
+                    style="${method ? "display:block;" : ""}"
+                >
+                <div class="error-message">QR image is required.</div>
+            </div>
+
+            <div class="form-field">
+                <label>Mobile / Account Number</label>
+                <input 
+                    type="text" 
+                    id="methodNumberInput" 
+                    placeholder="Optional"
+                    value="${method ? escapeAttribute(method.number || "") : ""}"
+                >
+            </div>
+
+            <div class="form-field">
+                <label>Card Color</label>
+                <div class="color-grid">
+                    ${colorOptions.map(color => `
+                        <button 
+                            type="button"
+                            class="color-option ${selectedColor.toLowerCase() === color.toLowerCase() ? "selected" : ""}" 
+                            style="background:${color};"
+                            onclick="selectColor('${color}')"
+                            aria-label="Choose ${color}"
+                        ></button>
+                    `).join("")}
+
+                    <span class="custom-color-wrap" title="Custom color">
+                        <input 
+                            type="color" 
+                            class="custom-color" 
+                            id="customColorInput"
+                            value="${selectedColor}"
+                            onchange="selectColor(this.value)"
+                        >
+                    </span>
+                </div>
+            </div>
+
+            <div class="setup-actions">
+                <button onclick="saveMethodForm()">Save</button>
+                <button class="secondary" onclick="showSetupScreen()">Cancel</button>
+            </div>
+        </div>
+    `;
+}
+
+function selectColor(color){
+    selectedColor = color;
+
+    document.querySelectorAll(".color-option").forEach(button => {
+        button.classList.toggle(
+            "selected",
+            button.style.backgroundColor === hexToRgb(color)
+        );
+    });
+
+    const colorInput = document.getElementById("customColorInput");
+    if(colorInput){
+        colorInput.value = color;
+    }
+}
+
+function hexToRgb(hex){
+    const clean = hex.replace("#", "");
+    const num = parseInt(clean, 16);
+    const r = num >> 16;
+    const g = (num >> 8) & 255;
+    const b = num & 255;
+    return `rgb(${r}, ${g}, ${b})`;
+}
+
+function removeMethod(id){
+    const methods = getMethods().filter(method => method.id !== id);
+    saveMethods(methods);
+    showSetupScreen();
+    showToast("Removed");
+}
+
+function previewQR(){
+    const input = document.getElementById("methodQRInput");
+    const file = input.files[0];
+
+    if(!file) return;
+
+    showToast("Detecting QR...");
+
+    const reader = new FileReader();
+
+    reader.onload = function(e){
+        const img = new Image();
+
+        img.onload = function(){
+            try{
+                const croppedQR = detectAndCropQRWithJsQR(img);
+
+                pendingQRData = croppedQR;
+                clearFieldError("qrField");
+
+                const preview = document.getElementById("methodQRPreview");
+                preview.src = croppedQR;
+                preview.style.display = "block";
+
+                input.value = "";
+                showToast("QR detected and cropped!");
+            }catch(error){
+                input.value = "";
+                showToast(error.message || "QR not detected");
+            }
+        };
+
+        img.onerror = function(){
+            input.value = "";
+            showToast("Could not read image");
+        };
+
+        img.src = e.target.result;
+    };
+
+    reader.readAsDataURL(file);
+}
+
+function detectAndCropQRWithJsQR(img){
+    if(typeof jsQR === "undefined"){
+        throw new Error("QR library failed to load");
+    }
+
+    const maxDetectSize = 1600;
+    const scale = Math.min(1, maxDetectSize / Math.max(img.width, img.height));
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+    canvas.width = Math.max(1, Math.round(img.width * scale));
+    canvas.height = Math.max(1, Math.round(img.height * scale));
+
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    const qr = jsQR(imageData.data, imageData.width, imageData.height, {
+        inversionAttempts: "attemptBoth"
+    });
+
+    if(!qr || !qr.location){
+        throw new Error("QR not detected");
+    }
+
+    const points = [
+        qr.location.topLeftCorner,
+        qr.location.topRightCorner,
+        qr.location.bottomRightCorner,
+        qr.location.bottomLeftCorner
+    ];
+
+    let minX = Math.min(...points.map(point => point.x)) / scale;
+    let minY = Math.min(...points.map(point => point.y)) / scale;
+    let maxX = Math.max(...points.map(point => point.x)) / scale;
+    let maxY = Math.max(...points.map(point => point.y)) / scale;
+
+    let width = maxX - minX;
+    let height = maxY - minY;
+
+    const padding = Math.max(width, height) * 0.04;
+
+    minX -= padding;
+    minY -= padding;
+    maxX += padding;
+    maxY += padding;
+
+    width = maxX - minX;
+    height = maxY - minY;
+
+    const size = Math.min(
+        Math.max(width, height),
+        img.width,
+        img.height
+    );
+
+    const centerX = minX + width / 2;
+    const centerY = minY + height / 2;
+
+    let sourceX = centerX - size / 2;
+    let sourceY = centerY - size / 2;
+
+    sourceX = clamp(sourceX, 0, img.width - size);
+    sourceY = clamp(sourceY, 0, img.height - size);
+
+    const output = document.createElement("canvas");
+    output.width = 700;
+    output.height = 700;
+
+    const outCtx = output.getContext("2d");
+
+    outCtx.fillStyle = "white";
+    outCtx.fillRect(0, 0, output.width, output.height);
+
+    outCtx.drawImage(
+        img,
+        sourceX,
+        sourceY,
+        size,
+        size,
+        0,
+        0,
+        output.width,
+        output.height
+    );
+
+    return output.toDataURL("image/jpeg", 0.92);
+}
+
+function saveMethodForm(){
+    const nameInput = document.getElementById("methodNameInput");
+    const numberInput = document.getElementById("methodNumberInput");
+
+    const name = nameInput.value.trim();
+    const number = numberInput.value.trim();
+
+    clearFieldError("nameField");
+    clearFieldError("qrField");
+
+    let hasError = false;
+
+    if(!name){
+        setFieldError("nameField");
+        hasError = true;
+    }
+
+    const methods = getMethods();
+
+    if(editingId){
+        const index = methods.findIndex(method => method.id === editingId);
+
+        if(index === -1){
+            showToast("Card not found");
+            return;
+        }
+
+        if(!pendingQRData && !methods[index].qr){
+            setFieldError("qrField");
+            hasError = true;
+        }
+
+        if(hasError){
+            showToast("Please complete required fields");
+            return;
+        }
+
+        methods[index] = {
+            ...methods[index],
+            name,
+            number,
+            color: selectedColor,
+            qr: pendingQRData || methods[index].qr
+        };
+    }else{
+        if(!pendingQRData){
+            setFieldError("qrField");
+            hasError = true;
+        }
+
+        if(hasError){
+            showToast("Please complete required fields");
+            return;
+        }
+
+        methods.push({
+            id: makeId(),
+            name,
+            number,
+            color: selectedColor,
+            qr: pendingQRData
+        });
+    }
+
+    saveMethods(methods);
+    pendingQRData = null;
+    editingId = null;
+    showSetupScreen();
+    showToast("Saved!");
+}
+
+function finishSetup(){
+    const methods = getMethods();
+
+    if(methods.length === 0){
+        showEmptyScreen();
+    }else{
+        showCarousel(methods.map(decorateMethod));
+    }
+}
+
+function cancelSetup(){
+    const methods = getMethods();
+
+    if(methods.length === 0){
+        showEmptyScreen();
+    }else{
+        showCarousel(methods.map(decorateMethod));
+    }
+}
+
+function showCarousel(methods){
+    currentView = "carousel";
+
+    cardCount = methods.length;
+    angleStep = 360 / cardCount;
+    rotation = 0;
+    activeIndex = 0;
+
+    app.innerHTML = `
+        <h1>Scan to Pay</h1>
+
+        <div class="scene" id="scene">
+            <div class="carousel" id="carousel">
+                ${methods.map((method, index) => {
+                    const rotate = index * angleStep;
+
+                    return `
+                        <div 
+                            class="payment-card ${method.number ? "" : "no-number"}" 
+                            data-index="${index}"
+                            style="transform:rotateY(${rotate}deg) translateZ(${radius}px);"
+                        >
+                            <button 
+                                class="card-download-btn" 
+                                type="button"
+                                onpointerdown="stopCardButtonEvent(event)"
+                                onclick="downloadCardImage(${index}, event)"
+                                aria-label="Download ${escapeAttribute(method.name)} card"
+                            >
+                                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                    <path d="M12 4V15" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+                                    <path d="M7.5 10.5L12 15L16.5 10.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <path d="M5 20H19" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+                                </svg>
+                            </button>
+                            <h2>${escapeHTML(method.name)}</h2>
+                            ${method.number ? `<p class="account-number">${escapeHTML(method.number)}</p>` : ""}
+                            <img src="${method.qr}" alt="${escapeAttribute(method.name)} QR">
+                            ${method.number ? `<p>Tap to copy number</p>` : ""}
+                        </div>
+                    `;
+                }).join("")}
+            </div>
+        </div>
+
+        <div class="top-buttons">
+            <button onclick="shareActiveCardImage()">Share Card</button>
+            <button onclick="showSetupScreen()">Manage QR</button>
+        </div>
+    `;
+
+    scene = document.getElementById("scene");
+    carousel = document.getElementById("carousel");
+    cards = document.querySelectorAll(".payment-card");
+
+    setupCarouselEvents(methods);
+    updateCarousel(methods);
+}
+
+function getActiveIndex(){
+    let index = Math.round((-rotation / angleStep) % cardCount);
+
+    if(index < 0){
+        index += cardCount;
+    }
+
+    return index;
+}
+
+function updateCarousel(methods){
+    carousel.style.transform = `
+        translateZ(${-radius}px)
+        rotateY(${rotation}deg)
+    `;
+
+    activeIndex = getActiveIndex();
+
+    cards.forEach((card, index) => {
+        const method = methods[index];
+
+        card.style.opacity = isDragging || index === activeIndex ? "1" : "0";
+        card.classList.toggle("active", index === activeIndex);
+
+        if(index === activeIndex){
+            card.style.borderColor = method.color;
+            card.style.boxShadow = `0 0 40px ${method.color}99`;
+        }else{
+            card.style.borderColor = "transparent";
+            card.style.boxShadow = "0 12px 35px rgba(0,0,0,.28)";
+        }
+    });
+
+    document.body.style.background = methods[activeIndex].background;
+}
+
+function snapCarousel(methods){
+    rotation = Math.round(rotation / angleStep) * angleStep;
+    updateCarousel(methods);
+}
+
+
+function loadImage(src){
+    return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = reject;
+        image.src = src;
+    });
+}
+
+function roundRect(ctx, x, y, width, height, radius){
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + width - radius, y);
+    ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+    ctx.lineTo(x + width, y + height - radius);
+    ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+    ctx.lineTo(x + radius, y + height);
+    ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+}
+
+function wrapText(ctx, text, x, y, maxWidth, lineHeight){
+    const words = String(text).split(" ");
+    let line = "";
+    const lines = [];
+
+    words.forEach(word => {
+        const testLine = line ? line + " " + word : word;
+
+        if(ctx.measureText(testLine).width > maxWidth && line){
+            lines.push(line);
+            line = word;
+        }else{
+            line = testLine;
+        }
+    });
+
+    if(line){
+        lines.push(line);
+    }
+
+    lines.slice(0, 2).forEach((item, index) => {
+        ctx.fillText(item, x, y + index * lineHeight);
+    });
+
+    return lines.length;
+}
+
+async function createCardImageBlob(method){
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+
+    canvas.width = 900;
+    canvas.height = 1200;
+
+    const color = method.color || defaultColor;
+
+    const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    gradient.addColorStop(0, color);
+    gradient.addColorStop(1, lightenColor(color, 38));
+
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.save();
+    ctx.shadowColor = "rgba(15,23,42,.22)";
+    ctx.shadowBlur = 45;
+    ctx.shadowOffsetY = 22;
+    ctx.fillStyle = "#ffffff";
+    roundRect(ctx, 110, 100, 680, 940, 54);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 8;
+    roundRect(ctx, 110, 100, 680, 940, 54);
+    ctx.stroke();
+
+    ctx.fillStyle = "#101828";
+    ctx.textAlign = "center";
+    ctx.font = "800 58px Arial, sans-serif";
+    wrapText(ctx, method.name, canvas.width / 2, 220, 560, 66);
+
+    let qrTop = method.number ? 400 : 330;
+
+    if(method.number){
+        ctx.fillStyle = "#475467";
+        ctx.font = "800 30px Arial, sans-serif";
+        ctx.fillText(method.number, canvas.width / 2, 310);
+    }
+
+    const qrImage = await loadImage(method.qr);
+
+    ctx.save();
+    ctx.shadowColor = "rgba(16,24,40,.12)";
+    ctx.shadowBlur = 24;
+    ctx.shadowOffsetY = 10;
+    ctx.fillStyle = "#ffffff";
+    roundRect(ctx, 190, qrTop, 520, 520, 42);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.drawImage(qrImage, 220, qrTop + 30, 460, 460);
+
+    ctx.fillStyle = "#667085";
+    ctx.font = "700 26px Arial, sans-serif";
+
+    if(method.number){
+        ctx.fillText("Scan to pay", canvas.width / 2, 980);
+    }else{
+        ctx.fillText("Scan this QR to pay", canvas.width / 2, 930);
+    }
+
+    return await new Promise(resolve => {
+        canvas.toBlob(blob => resolve(blob), "image/png", 0.95);
+    });
+}
+
+function getDecoratedMethods(){
+    return getMethods().map(decorateMethod);
+}
+
+function getCardFileName(method){
+    return `${method.name.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_pay_qr.png`;
+}
+
+
+function stopCardButtonEvent(event){
+    event.preventDefault();
+    event.stopPropagation();
+
+    if(event.stopImmediatePropagation){
+        event.stopImmediatePropagation();
+    }
+}
+
+async function downloadCardImage(index = activeIndex, event = null){
+    if(event){
+        event.preventDefault();
+        event.stopPropagation();
+
+        if(event.stopImmediatePropagation){
+            event.stopImmediatePropagation();
+        }
+    }
+
+    const methods = getDecoratedMethods();
+
+    if(methods.length === 0){
+        showToast("No card to download");
+        return;
+    }
+
+    const method = methods[index] || methods[0];
+    const blob = await createCardImageBlob(method);
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = getCardFileName(method);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+
+    URL.revokeObjectURL(url);
+    showToast("Card image downloaded");
+}
+
+async function shareActiveCardImage(){
+    const methods = getDecoratedMethods();
+
+    if(methods.length === 0){
+        showToast("No card to share");
+        return;
+    }
+
+    const method = methods[activeIndex] || methods[0];
+    const blob = await createCardImageBlob(method);
+    const file = new File([blob], getCardFileName(method), {
+        type: "image/png"
+    });
+
+    if(navigator.canShare && navigator.canShare({ files:[file] })){
+        try{
+            await navigator.share({
+                title: `${method.name} QR`,
+                text: `Scan this ${method.name} QR to pay.`,
+                files:[file]
+            });
+
+            showToast("Share opened");
+        }catch(error){
+            if(error.name !== "AbortError"){
+                showToast("Share cancelled");
+            }
+        }
+    }else{
+        await downloadCardImage(activeIndex);
+        showToast("Sharing not supported, downloaded instead");
+    }
+}
+
+async function copyAccountNumber(method){
+    if(!method.number){
+        return;
+    }
+
+    try{
+        await navigator.clipboard.writeText(method.number);
+        showToast(`${method.name} number copied!`);
+    }catch{
+        const tempInput = document.createElement("input");
+        tempInput.value = method.number;
+        document.body.appendChild(tempInput);
+        tempInput.select();
+        document.execCommand("copy");
+        document.body.removeChild(tempInput);
+
+        showToast(`${method.name} number copied!`);
+    }
+}
+
+function setupCarouselEvents(methods){
+    scene.addEventListener("pointerdown", e => {
+        if(e.target.closest(".card-download-btn")){
+            return;
+        }
+
+        isDragging = true;
+        moved = false;
+        startX = e.clientX;
+        startRotation = rotation;
+        scene.setPointerCapture(e.pointerId);
+        carousel.style.transition = "none";
+        updateCarousel(methods);
+    });
+
+    scene.addEventListener("pointermove", e => {
+        if(!isDragging) return;
+
+        e.preventDefault();
+
+        const diff = e.clientX - startX;
+
+        if(Math.abs(diff) > 6){
+            moved = true;
+        }
+
+        rotation = startRotation + diff * 0.45;
+        updateCarousel(methods);
+    });
+
+    scene.addEventListener("pointerup", e => {
+        if(e.target.closest(".card-download-btn")){
+            return;
+        }
+
+        isDragging = false;
+        scene.releasePointerCapture(e.pointerId);
+        carousel.style.transition = "transform .35s ease";
+        snapCarousel(methods);
+
+        if(!moved){
+            copyAccountNumber(methods[activeIndex]);
+        }
+    });
+
+    scene.addEventListener("pointercancel", () => {
+        isDragging = false;
+        carousel.style.transition = "transform .35s ease";
+        snapCarousel(methods);
+    });
+
+    cards.forEach((card, index) => {
+        card.addEventListener("click", event => {
+            if(event.target.closest(".card-download-btn")){
+                return;
+            }
+
+            if(index === activeIndex){
+                copyAccountNumber(methods[index]);
+            }else{
+                rotation = -index * angleStep;
+                updateCarousel(methods);
+            }
+        });
+    });
+}
+
+function setFieldError(fieldId){
+    const field = document.getElementById(fieldId);
+
+    if(field){
+        field.classList.add("error");
+    }
+}
+
+function clearFieldError(fieldId){
+    const field = document.getElementById(fieldId);
+
+    if(field){
+        field.classList.remove("error");
+    }
+}
+
+function clamp(value, min, max){
+    return Math.min(Math.max(value, min), max);
+}
+
+function escapeHTML(value){
+    return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+function escapeAttribute(value){
+    return escapeHTML(value);
+}
+
+window.addEventListener("resize", () => {
+    radius = window.innerWidth <= 480 ? 300 : 340;
+
+    if(currentView === "carousel"){
+        const methods = getMethods();
+
+        if(methods.length > 0){
+            showCarousel(methods.map(decorateMethod));
+        }
+    }
+});
+
+const savedMethods = getMethods();
+
+if(savedMethods.length === 0){
+    showEmptyScreen();
+}else{
+    showCarousel(savedMethods.map(decorateMethod));
+}
+</script>
 
 </body>
 </html>
